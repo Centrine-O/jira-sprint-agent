@@ -1,0 +1,28 @@
+# Python virtual environment
+.venv/
+
+# Secrets: NEVER commit
+.env
+
+# Personal Jira settings (each user generates their own)
+config.yaml
+*.yaml.local
+
+# Local data: audit log database and run history
+data/
+*.db
+*.sqlite3
+logs/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor and OS files
+.vscode/
+.DS_Store
