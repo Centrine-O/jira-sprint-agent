@@ -13,6 +13,8 @@ from jira_agent.config import get_secrets
 from jira_agent.board_config import DEFAULT_CONFIG_PATH, BoardConfig, ConfigError, load_board_config, save_board_config
 from jira_agent.jira.client import JiraClient, JiraError
 from jira_agent.jira import discovery
+import json
+from jira_agent.planner.context import build_board_context
 
 app = typer.Typer(
     help="Jira Sprint Agent: turn pasted team updates into reviewed Jira changes.",
@@ -283,6 +285,66 @@ def init(
     missing = [name for name, value in config.fields.model_dump().items() if not value]
     if missing:
         _fail("These fields weren't found and related features will be off: " + ", ".join(missing))
-        
+
+
+@app.command()
+def snapshot(
+    config_path: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config", help="Which board settings file to use."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print the raw data the planner will receive."
+    ),
+) -> None:
+    """Show the current state of the board (read-only)."""
+    try:
+        config = load_board_config(config_path)
+    except ConfigError as exc:
+        _fail(str(exc))
+        raise typer.Exit(code=1)
+
+    try:
+        with JiraClient() as jira:
+            context = build_board_context(jira, config)
+    except JiraError as exc:
+        _fail(f"Jira: {exc}")
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(json.dumps(context, indent=2, ensure_ascii=False))
+        return
+
+    def show_issue(issue: dict) -> None:
+        who = issue["assignee"] or "unassigned"
+        points = f", {issue['story_points']} pts" if issue["story_points"] is not None else ""
+        flag = "  [FLAGGED]" if issue["flagged"] else ""
+        parent = f"  (under {issue['parent']})" if issue["parent"] else ""
+        _info(f"{issue['key']:<9} [{issue['status']}] {issue['summary']}  - {who}{points}{flag}{parent}")
+        for link in issue["links"]:
+            _info(f"            {link['relation']} {link['issue']}")
+
+    project = context["project"]
+    typer.secho(f"\n{project['key']} - {project['name']}", bold=True)
+
+    sprint = context["sprint"]
+    if sprint:
+        typer.secho(f"\nSprint: {sprint['name']} [{sprint['state']}]", bold=True)
+        if sprint["goal"]:
+            _info(f"Goal: {sprint['goal']}")
+        if not context["sprint_issues"]:
+            _info("No issues in this sprint yet.")
+        for issue in context["sprint_issues"]:
+            show_issue(issue)
+    else:
+        typer.secho("\nNo active or future sprint on this board.", bold=True)
+
+    typer.secho(f"\nBacklog (not done, not in a sprint): {len(context['backlog'])}", bold=True)
+    for issue in context["backlog"]:
+        show_issue(issue)
+
+    typer.secho(f"\nOpen epics: {len(context['epics'])}", bold=True)
+    for epic in context["epics"]:
+        _info(f"{epic['key']:<9} [{epic['status']}] {epic['summary']}")
+    
 if __name__ == "__main__":
     app()
