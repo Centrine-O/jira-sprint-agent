@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from jira_agent.config import get_secrets
 from jira_agent.jira.client import JiraClient, JiraError
+from jira_agent.jira import discovery
 
 app = typer.Typer(
     help="Jira Sprint Agent: turn pasted team updates into reviewed Jira changes.",
@@ -110,5 +111,61 @@ def doctor() -> None:
         raise typer.Exit(code=1)
 
 
+
+@app.command()
+def inspect(
+    project_key: str = typer.Argument(..., help="Jira project key, e.g. SBK"),
+) -> None:
+    """Show what the tool can see about a Jira project (read-only)."""
+    key = project_key.upper()
+    try:
+        with JiraClient() as jira:
+            project = discovery.get_project(jira, key)
+            typer.secho(
+                f"\nProject: {project['key']} - {project['name']} ({project['style']})",
+                bold=True,
+            )
+
+            typer.secho("\nIssue types:", bold=True)
+            for it in sorted(project["issue_types"], key=lambda i: -i["hierarchy_level"]):
+                kind = "subtask" if it["subtask"] else f"level {it['hierarchy_level']}"
+                _info(f"{it['name']} ({kind})")
+
+            typer.secho("\nWorkflow statuses:", bold=True)
+            for type_name, statuses in discovery.get_statuses(jira, key).items():
+                names = ", ".join(f"{s['name']} [{s['category']}]" for s in statuses)
+                _info(f"{type_name}: {names}")
+
+            typer.secho("\nSpecial fields:", bold=True)
+            for name, field_id in discovery.get_special_fields(jira).items():
+                _info(f"{name}: {field_id or 'NOT FOUND'}")
+
+            typer.secho("\nLink types:", bold=True)
+            for lt in discovery.get_link_types(jira):
+                _info(f"{lt['name']}: '{lt['outward']}' / '{lt['inward']}'")
+
+            typer.secho("\nPriorities:", bold=True)
+            _info(", ".join(p["name"] for p in discovery.get_priorities(jira)))
+
+            typer.secho("\nTeam members:", bold=True)
+            for member in discovery.get_team_members(jira, key):
+                _info(member["name"])
+
+            typer.secho("\nBoards and sprints:", bold=True)
+            boards = discovery.get_boards(jira, key)
+            if not boards:
+                _info("No boards found.")
+            for board in boards:
+                _info(f"Board {board['id']}: {board['name']} ({board['type']})")
+                if board["type"] == "scrum":
+                    sprints = discovery.get_sprints(jira, board["id"])
+                    if not sprints:
+                        _info("   No active or future sprints yet.")
+                    for s in sprints:
+                        _info(f"   Sprint {s['id']}: {s['name']} [{s['state']}]")
+    except JiraError as exc:
+        _fail(f"Jira: {exc}")
+        raise typer.Exit(code=1)
+        
 if __name__ == "__main__":
     app()
