@@ -30,3 +30,6 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# All board config files (generated per user by jira-agent init)
+config*.yaml

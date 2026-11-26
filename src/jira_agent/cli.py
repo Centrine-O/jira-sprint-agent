@@ -4,11 +4,13 @@ Run `jira-agent --help` to see the available commands.
 """
 
 from importlib.metadata import version as package_version
+from pathlib import Path
 
 import typer
 from pydantic import ValidationError
 
 from jira_agent.config import get_secrets
+from jira_agent.board_config import DEFAULT_CONFIG_PATH, BoardConfig, ConfigError, load_board_config, save_board_config
 from jira_agent.jira.client import JiraClient, JiraError
 from jira_agent.jira import discovery
 
@@ -166,6 +168,121 @@ def inspect(
     except JiraError as exc:
         _fail(f"Jira: {exc}")
         raise typer.Exit(code=1)
+
+
+@app.command()
+def init(
+    config_path: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config", help="Where to write the settings file."
+    ),
+) -> None:
+    """Create config.yaml for your board by reading its setup from Jira."""
+    existing_aliases: dict[str, list[str]] = {}
+    if config_path.exists():
+        if not typer.confirm(f"{config_path} already exists. Replace it?", default=False):
+            typer.echo("Nothing changed.")
+            raise typer.Exit()
+        try:
+            old = load_board_config(config_path)
+            existing_aliases = {m.account_id: m.aliases for m in old.team}
+            typer.echo("Existing nicknames will be offered as defaults.")
+        except ConfigError:
+            pass
+
+    try:
+        with JiraClient() as jira:
+            projects = list(jira.paginate("/rest/api/3/project/search"))
+            if not projects:
+                _fail("Your Jira account can't see any projects.")
+                raise typer.Exit(code=1)
+
+            typer.secho("\nProjects your account can see:", bold=True)
+            for p in projects:
+                typer.echo(f"  {p['key']:<10} {p['name']}")
+            key = typer.prompt("\nWhich project? Type its key").strip().upper()
+            if key not in {p["key"] for p in projects}:
+                _fail(f"'{key}' isn't in the list above.")
+                raise typer.Exit(code=1)
+
+            project = discovery.get_project(jira, key)
+            boards = [b for b in discovery.get_boards(jira, key) if b["type"] == "scrum"]
+            if not boards:
+                _fail(f"{key} has no Scrum board. The tool needs one to manage sprints.")
+                raise typer.Exit(code=1)
+            if len(boards) == 1:
+                board = boards[0]
+                _ok(f"Using board {board['id']}: {board['name']}")
+            else:
+                typer.secho("\nScrum boards in this project:", bold=True)
+                for b in boards:
+                    typer.echo(f"  {b['id']}: {b['name']}")
+                board_id = typer.prompt("Which board? Type its number", type=int)
+                board = next((b for b in boards if b["id"] == board_id), None)
+                if board is None:
+                    _fail(f"Board {board_id} isn't in the list above.")
+                    raise typer.Exit(code=1)
+
+            typer.echo("Reading statuses, fields, link types, priorities and team...")
+            statuses = discovery.get_statuses(jira, key)
+            fields = discovery.get_special_fields(jira)
+            link_types = discovery.get_link_types(jira)
+            priorities = [p["name"] for p in discovery.get_priorities(jira)]
+            members = discovery.get_team_members(jira, key)
+    except JiraError as exc:
+        _fail(f"Jira: {exc}")
+        raise typer.Exit(code=1)
+
+    typer.secho("\nNicknames", bold=True)
+    typer.echo(
+        "For each person, type the names your team uses for them in updates,\n"
+        "separated by commas (e.g. Kev, Kevo). Press Enter to skip."
+    )
+    team = []
+    for m in members:
+        default = ", ".join(existing_aliases.get(m["account_id"], []))
+        raw = typer.prompt(f"  {m['name']}", default=default, show_default=bool(default))
+        aliases = [
+            a.strip()
+            for a in raw.split(",")
+            if a.strip() and a.strip().lower() != m["name"].lower()
+        ]
+        team.append({"account_id": m["account_id"], "name": m["name"], "aliases": aliases})
+
+    type_names = [t["name"] for t in project["issue_types"] if not t["subtask"]]
+    suggested = "Task" if "Task" in type_names else type_names[0]
+    chosen = typer.prompt(
+        f"\nDefault type for new work items ({', '.join(type_names)})", default=suggested
+    ).strip()
+    chosen = next((n for n in type_names if n.lower() == chosen.lower()), chosen)
+
+    data = {
+        "project_key": project["key"],
+        "project_name": project["name"],
+        "project_style": project["style"],
+        "board_id": board["id"],
+        "board_name": board["name"],
+        "issue_types": project["issue_types"],
+        "statuses": statuses,
+        "fields": fields,
+        "link_types": link_types,
+        "priorities": priorities,
+        "team": team,
+        "defaults": {"new_issue_type": chosen},
+    }
+    try:
+        config = BoardConfig.model_validate(data)
+    except ValidationError as exc:
+        _fail("The settings didn't pass validation:")
+        for error in exc.errors():
+            _info(f"{'.'.join(str(p) for p in error['loc'])}: {error['msg']}")
+        raise typer.Exit(code=1)
+
+    save_board_config(config, config_path)
+    typer.echo("")
+    _ok(f"Saved {config_path} for {config.project_key} (board {config.board_id})")
+    missing = [name for name, value in config.fields.model_dump().items() if not value]
+    if missing:
+        _fail("These fields weren't found and related features will be off: " + ", ".join(missing))
         
 if __name__ == "__main__":
     app()
