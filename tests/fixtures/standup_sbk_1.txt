@@ -1,0 +1,6 @@
+Ertiman: staging server is done and live now.
+Enock: timetable view is still waiting for review, it was blocked by staging but that's sorted now.
+dkipkirui: started on the fee statement page, spent 3 hours on it today. Also the mobile login crash only happens on Android.
+New task for Centrine: write the UAT checklist for the student portal, link it to the timetable story.
+Pull the report card PDF export into this sprint.
+Someone also mentioned the dashboard work is almost done.
