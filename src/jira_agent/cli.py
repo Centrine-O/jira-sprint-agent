@@ -15,6 +15,7 @@ from jira_agent.jira.client import JiraClient, JiraError
 from jira_agent.jira import discovery
 import json
 from jira_agent.planner.context import build_board_context
+from jira_agent.sandbox import SeedError, seed_sandbox
 
 app = typer.Typer(
     help="Jira Sprint Agent: turn pasted team updates into reviewed Jira changes.",
@@ -346,5 +347,39 @@ def snapshot(
     for epic in context["epics"]:
         _info(f"{epic['key']:<9} [{epic['status']}] {epic['summary']}")
     
+@app.command("seed-sandbox")
+def seed_sandbox_command(
+    config_path: Path = typer.Option(
+        ..., "--config", help="Settings file of the SANDBOX board, e.g. config.sbk.yaml."
+    ),
+) -> None:
+    """Fill a sandbox project with sample issues for testing (sandbox only)."""
+    try:
+        config = load_board_config(config_path)
+    except ConfigError as exc:
+        _fail(str(exc))
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"This will create about 9 sample issues in {config.project_key} "
+        f"({config.project_name})."
+    )
+    if not typer.confirm("Continue?", default=False):
+        typer.echo("Nothing changed.")
+        raise typer.Exit()
+
+    try:
+        with JiraClient() as jira:
+            seed_sandbox(jira, config, log=_info)
+    except SeedError as exc:
+        _fail(str(exc))
+        raise typer.Exit(code=1)
+    except JiraError as exc:
+        _fail(f"Jira: {exc}")
+        _info("Some issues may already have been created. Check the sandbox in Jira.")
+        raise typer.Exit(code=1)
+
+    _ok("Sandbox seeded. Run `jira-agent snapshot --config ...` to see it.")
+
 if __name__ == "__main__":
     app()

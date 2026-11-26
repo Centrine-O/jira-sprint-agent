@@ -120,7 +120,8 @@ def build_board_context(
     backlog = _search(
         jira,
         config,
-        f"project = {key} AND (sprint is EMPTY OR sprint not in openSprints()) "
+        f"project = {key} AND (sprint is EMPTY OR "
+        f"(sprint not in openSprints() AND sprint not in futureSprints())) "
         f"AND statusCategory != Done AND issuetype != Epic ORDER BY Rank ASC",
         limit=backlog_limit,
     )
