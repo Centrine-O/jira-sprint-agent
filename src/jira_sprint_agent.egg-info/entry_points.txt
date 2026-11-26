@@ -1,2 +1,0 @@
-[console_scripts]
-jira-agent = jira_agent.cli:app
