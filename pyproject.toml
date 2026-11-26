@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jira-sprint-agent"
+version = "0.1.0"
+description = "Turns pasted team updates into reviewed, approved Jira changes for a sprint."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "anthropic",
+    "pydantic",
+    "pydantic-settings",
+    "pyyaml",
+    "python-dotenv",
+    "jinja2",
+    "python-multipart",
+    "typer",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+jira-agent = "jira_agent.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jira_agent = ["web/templates/*.html", "web/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: tests that talk to a real Jira sandbox project"]
+addopts = "-m 'not integration'"
