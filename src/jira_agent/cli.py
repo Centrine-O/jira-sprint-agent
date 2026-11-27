@@ -183,6 +183,7 @@ def init(
 ) -> None:
     """Create config.yaml for your board by reading its setup from Jira."""
     existing_aliases: dict[str, list[str]] = {}
+    existing_excluded: list[str] = []
     if config_path.exists():
         if not typer.confirm(f"{config_path} already exists. Replace it?", default=False):
             typer.echo("Nothing changed.")
@@ -190,6 +191,7 @@ def init(
         try:
             old = load_board_config(config_path)
             existing_aliases = {m.account_id: m.aliases for m in old.team}
+            existing_excluded = old.excluded_members
             typer.echo("Existing nicknames will be offered as defaults.")
         except ConfigError:
             pass
@@ -237,6 +239,18 @@ def init(
         _fail(f"Jira: {exc}")
         raise typer.Exit(code=1)
 
+    typer.secho("\nTeam members found in Jira:", bold=True)
+    for m in members:
+        typer.echo(f"  {m['name']}")
+    raw_excluded = typer.prompt(
+        "\nAnyone to leave OFF the team list? Names separated by commas (Enter for none)",
+        default=", ".join(existing_excluded),
+        show_default=bool(existing_excluded),
+    )
+    excluded = [x.strip() for x in raw_excluded.split(",") if x.strip()]
+    excluded_lower = {x.lower() for x in excluded}
+    members = [m for m in members if m["name"].lower() not in excluded_lower]
+
     typer.secho("\nNicknames", bold=True)
     typer.echo(
         "For each person, type the names your team uses for them in updates,\n"
@@ -272,6 +286,7 @@ def init(
         "link_types": link_types,
         "priorities": priorities,
         "team": team,
+        "excluded_members": excluded,
         "defaults": {"new_issue_type": chosen},
     }
     try:

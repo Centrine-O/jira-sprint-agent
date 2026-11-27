@@ -97,6 +97,7 @@ class BoardConfig(BaseModel):
     link_types: list[LinkType]
     priorities: list[str]
     team: list[TeamMember]
+    excluded_members: list[str] = Field(default_factory=list)  # never treated as team members
     defaults: Defaults = Field(default_factory=Defaults)
     claude: ClaudeSettings = Field(default_factory=ClaudeSettings)
     safety: Safety = Field(default_factory=Safety)
