@@ -544,5 +544,180 @@ def plan(
         f"{result.input_tokens} in / {result.output_tokens} out tokens. Nothing was applied."
     )
 
+# ---- full workflow: plan -> review -> approve -> apply ---------------------
+
+from jira_agent.audit.log import AuditLog  # noqa: E402
+from jira_agent.executor.executor import Executor  # noqa: E402
+from jira_agent.planner.schema import HIGH_IMPACT  # noqa: E402
+
+OUTCOME_STYLE = {
+    "applied": ("OK  ", typer.colors.GREEN),
+    "dry-run": ("~   ", typer.colors.CYAN),
+    "skipped": ("--  ", typer.colors.YELLOW),
+    "failed": ("FAIL", typer.colors.RED),
+}
+
+
+def _show_review(result, checked) -> None:
+    colours = {"high": typer.colors.GREEN, "medium": typer.colors.YELLOW, "low": typer.colors.RED}
+    common = {"id", "type", "target", "depends_on", "source_text", "on_behalf_of", "confidence", "reasoning"}
+    typer.secho(f"\nPlan: {result.plan.summary}", bold=True)
+    for c in checked:
+        a = c.action
+        typer.echo("")
+        verdict, vcolour = ("READY", typer.colors.GREEN) if c.ok else ("BLOCKED", typer.colors.RED)
+        typer.secho(f"  {a.id}  {a.type}  {a.target or ''}", bold=True, nl=False)
+        typer.secho(f"   [{a.confidence}]", fg=colours[a.confidence], nl=False)
+        typer.secho(f"  {verdict}", fg=vcolour, bold=True)
+        for name, value in a.model_dump().items():
+            if name not in common and value not in (None, [], ""):
+                _info(f"{name}: {value}")
+        if a.on_behalf_of:
+            _info(f"for: {a.on_behalf_of}")
+        _info(f"from: \"{a.source_text}\"")
+        _info(f"why: {a.reasoning}")
+        for error in c.errors:
+            typer.secho(f"         x {error}", fg=typer.colors.RED)
+        for warning in c.warnings:
+            typer.secho(f"         ! {warning}", fg=typer.colors.YELLOW)
+    if result.plan.clarifications:
+        typer.secho("\nNeeds clarification (not applied; re-run with a clearer update):",
+                    bold=True, fg=typer.colors.YELLOW)
+        for q in result.plan.clarifications:
+            _info(f"? {q.question}")
+            if q.options:
+                _info(f"  options: {' | '.join(q.options)}")
+
+
+def _choose_approvals(checked) -> set[str]:
+    ready = [c.action.id for c in checked if c.ok]
+    if not ready:
+        typer.secho("\nNothing is READY to apply.", fg=typer.colors.YELLOW)
+        return set()
+    high = [c.action.id for c in checked
+            if c.ok and c.action.confidence == "high" and c.action.type not in HIGH_IMPACT]
+    typer.secho("\nWhich READY actions should be applied?", bold=True)
+    _info(f"Enter  = the {len(high)} high-confidence ones ({', '.join(high) or 'none'})")
+    _info(f"all    = every READY action ({len(ready)})")
+    _info("A1,A3  = only the ones you list")
+    _info("none   = cancel")
+    while True:
+        answer = typer.prompt("Your choice", default="", show_default=False).strip()
+        if answer == "":
+            return set(high)
+        if answer.lower() == "all":
+            return set(ready)
+        if answer.lower() == "none":
+            return set()
+        chosen = {part.strip().upper() for part in answer.replace(" ", ",").split(",") if part.strip()}
+        unknown = sorted(chosen - set(ready))
+        if unknown:
+            _fail(f"Not READY or not in the plan: {', '.join(unknown)}. Try again.")
+            continue
+        return chosen
+
+
+def _confirm_high_impact(checked, approved: set[str]) -> set[str]:
+    confirmed: set[str] = set()
+    for c in checked:
+        if c.action.id in approved and c.action.type in HIGH_IMPACT:
+            name = c.resolved.get("sprint_name") or c.action.sprint or ""
+            typer.secho(f"\n{c.action.id} will {c.action.type.replace('_', ' ').upper()} '{name}'.",
+                        fg=typer.colors.RED, bold=True)
+            typed = typer.prompt("Type the sprint name exactly to confirm, or press Enter to skip",
+                                 default="", show_default=False)
+            if typed.strip() == name:
+                confirmed.add(c.action.id)
+            else:
+                _info("Not confirmed; it will be skipped.")
+    return confirmed
+
+
+@app.command()
+def run(
+    text: str = typer.Option(None, "--text", help="The updates, in quotes."),
+    file: Path = typer.Option(None, "--file", help="A text file containing the updates."),
+    update_from: str = typer.Option(None, "--from", help="Who the updates are from, if the text doesn't say."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Which board settings file to use."),
+    apply: bool = typer.Option(False, "--apply", help="Really write to Jira. Without this, it's a dry run."),
+) -> None:
+    """Plan, review, approve and apply changes from pasted updates (dry run unless --apply)."""
+    if file:
+        if not file.exists():
+            _fail(f"{file} not found.")
+            raise typer.Exit(code=1)
+        text = file.read_text(encoding="utf-8")
+    if not text or not text.strip():
+        _fail("Give the updates with --text \"...\" or --file path.txt")
+        raise typer.Exit(code=1)
+    try:
+        config = load_board_config(config_path)
+    except ConfigError as exc:
+        _fail(str(exc))
+        raise typer.Exit(code=1)
+
+    dry_run = not apply
+    try:
+        with JiraClient() as jira, AuditLog() as audit:
+            runner = jira.get("/rest/api/3/myself").get("displayName", "Scrum Master")
+            typer.echo("Reading the board...")
+            context = build_board_context(jira, config)
+            typer.echo("Asking Claude for a plan...")
+            try:
+                result = plan_updates(config, context, text, runner=runner, update_from=update_from)
+            except PlannerError as exc:
+                _fail(str(exc))
+                raise typer.Exit(code=1)
+            typer.echo("Checking the plan against Jira...")
+            checked = validate_plan(result.plan, config, context, jira)
+
+            _show_review(result, checked)
+            approved = _choose_approvals(checked)
+            confirmed = _confirm_high_impact(checked, approved)
+
+            status = "dry_run" if dry_run else "completed"
+            if not approved:
+                status = "cancelled"
+            elif not dry_run and not typer.confirm(
+                f"\nApply {len(approved)} change(s) to {config.project_key} in Jira now?", default=False
+            ):
+                approved, status = set(), "cancelled"
+
+            run_id = audit.start_run(
+                runner=runner, project_key=config.project_key, updates_text=text,
+                plan=result.plan.model_dump(mode="json"), model=result.model,
+                prompt_version=result.prompt_version, input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens, dry_run=dry_run,
+            )
+            if approved:
+                typer.secho("\nDRY RUN: nothing is written to Jira." if dry_run else "\nApplying changes...",
+                            bold=True)
+            executor = Executor(jira, config, audit, run_id, runner,
+                                dry_run=dry_run, confirmed_high_impact=confirmed)
+            outcomes = executor.run(checked, approved)
+            if any(o.outcome == "failed" for o in outcomes) and status == "completed":
+                status = "completed_with_errors"
+            audit.finish_run(run_id, status)
+    except JiraError as exc:
+        _fail(f"Jira: {exc}")
+        raise typer.Exit(code=1)
+
+    typer.secho(f"\nResults (run #{run_id}):", bold=True)
+    order = {c.action.id: i for i, c in enumerate(checked)}
+    for o in sorted(outcomes, key=lambda o: order.get(o.action_id, 0)):
+        label, colour = OUTCOME_STYLE.get(o.outcome, ("?   ", typer.colors.WHITE))
+        typer.secho(f"  {label} ", fg=colour, bold=True, nl=False)
+        typer.echo(f"{o.action_id}  {o.message}")
+        if o.url:
+            _info(o.url)
+    counts = {k: sum(1 for o in outcomes if o.outcome == k) for k in OUTCOME_STYLE}
+    typer.echo(
+        f"\n{counts['applied']} applied, {counts['dry-run']} dry-run, "
+        f"{counts['skipped']} skipped, {counts['failed']} failed."
+    )
+    if dry_run and approved:
+        _info("This was a dry run. Re-run with --apply to make these changes in Jira.")
+
+
 if __name__ == "__main__":
     app()
