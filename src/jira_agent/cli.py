@@ -17,6 +17,7 @@ import json
 from jira_agent.planner.context import build_board_context
 from jira_agent.sandbox import SeedError, seed_sandbox
 from jira_agent.planner.planner import PlannerError, plan_updates
+from jira_agent.executor.validator import validate_plan
 
 app = typer.Typer(
     help="Jira Sprint Agent: turn pasted team updates into reviewed Jira changes.",
@@ -457,5 +458,91 @@ def plan(
         f"{result.input_tokens} in / {result.output_tokens} out tokens. Nothing was applied."
     )
     
+@app.command()
+def plan(
+    text: str = typer.Option(None, "--text", help="The updates, in quotes."),
+    file: Path = typer.Option(None, "--file", help="A text file containing the updates."),
+    update_from: str = typer.Option(None, "--from", help="Who the updates are from, if the text doesn't say."),
+    config_path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--config", help="Which board settings file to use."),
+) -> None:
+    """Propose Jira changes from pasted updates. Read-only: nothing is applied."""
+    if file:
+        if not file.exists():
+            _fail(f"{file} not found.")
+            raise typer.Exit(code=1)
+        text = file.read_text(encoding="utf-8")
+    if not text or not text.strip():
+        _fail("Give the updates with --text \"...\" or --file path.txt")
+        raise typer.Exit(code=1)
+
+    try:
+        config = load_board_config(config_path)
+    except ConfigError as exc:
+        _fail(str(exc))
+        raise typer.Exit(code=1)
+
+    try:
+        with JiraClient() as jira:
+            runner = jira.get("/rest/api/3/myself").get("displayName", "Scrum Master")
+            typer.echo("Reading the board...")
+            context = build_board_context(jira, config)
+
+            typer.echo("Asking Claude for a plan...")
+            try:
+                result = plan_updates(config, context, text, runner=runner, update_from=update_from)
+            except PlannerError as exc:
+                _fail(str(exc))
+                raise typer.Exit(code=1)
+
+            typer.echo("Checking the plan against Jira...")
+            checked = validate_plan(result.plan, config, context, jira)
+    except JiraError as exc:
+        _fail(f"Jira: {exc}")
+        raise typer.Exit(code=1)
+
+    colours = {"high": typer.colors.GREEN, "medium": typer.colors.YELLOW, "low": typer.colors.RED}
+    common = {"id", "type", "target", "depends_on", "source_text", "on_behalf_of", "confidence", "reasoning"}
+
+    typer.secho(f"\nPlan: {result.plan.summary}", bold=True)
+    for c in checked:
+        action = c.action
+        typer.echo("")
+        verdict, verdict_colour = ("READY", typer.colors.GREEN) if c.ok else ("BLOCKED", typer.colors.RED)
+        typer.secho(f"  {action.id}  {action.type}  {action.target or ''}", bold=True, nl=False)
+        typer.secho(f"   [{action.confidence}]", fg=colours[action.confidence], nl=False)
+        typer.secho(f"  {verdict}", fg=verdict_colour, bold=True)
+        details = {
+            k: v for k, v in action.model_dump().items()
+            if k not in common and v not in (None, [], "")
+        }
+        for name, value in details.items():
+            _info(f"{name}: {value}")
+        if action.on_behalf_of:
+            _info(f"for: {action.on_behalf_of}")
+        if action.depends_on:
+            _info(f"after: {', '.join(action.depends_on)}")
+        _info(f"from: \"{action.source_text}\"")
+        _info(f"why: {action.reasoning}")
+        for error in c.errors:
+            typer.secho(f"         x {error}", fg=typer.colors.RED)
+        for warning in c.warnings:
+            typer.secho(f"         ! {warning}", fg=typer.colors.YELLOW)
+
+    if result.plan.clarifications:
+        typer.secho("\nNeeds clarification:", bold=True, fg=typer.colors.YELLOW)
+        for q in result.plan.clarifications:
+            _info(f"? {q.question}")
+            if q.options:
+                _info(f"  options: {' | '.join(q.options)}")
+            _info(f"  from: \"{q.source_text}\"")
+
+    ready = sum(1 for c in checked if c.ok)
+    typer.echo(
+        f"\n{ready} ready, {len(checked) - ready} blocked, "
+        f"{len(result.plan.clarifications)} questions. "
+        f"Model {result.model}, prompt {result.prompt_version}, "
+        f"{result.input_tokens} in / {result.output_tokens} out tokens. Nothing was applied."
+    )
+
 if __name__ == "__main__":
     app()
