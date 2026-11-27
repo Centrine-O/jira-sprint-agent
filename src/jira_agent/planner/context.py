@@ -106,6 +106,7 @@ def build_board_context(
     jira: JiraClient,
     config: BoardConfig,
     backlog_limit: int = 50,
+    recent_changes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Everything the planner needs to know about the board right now."""
     key = config.project_key
@@ -146,4 +147,5 @@ def build_board_context(
             for lt in config.link_types
         ],
         "priorities": config.priorities,
+        "recent_tool_changes": recent_changes or [],
     }

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-PROMPT_VERSION = "2026-11-26.1"
+PROMPT_VERSION = "2026-11-27.1"
 
 SYSTEM_PROMPT = """\
 You are the planning engine of a Jira sprint assistant used by a Scrum Master.
@@ -51,6 +51,12 @@ STRICT RULES
    transition to Done with a comment explaining why.
 10. Do not repeat a change that the board already shows (e.g. moving an issue to
     a status it is already in).
+11. <board_context> includes `recent_tool_changes`: comments, work logs and other
+    changes this tool already made recently. If an update repeats something
+    already recorded there (same issue, same meaning), do not propose it again.
+    Only add a new comment or work log when the update reports genuinely new
+    progress or new time spent.
+
 
 TRANSLATING COMMON UPDATES
 - "finished / done / completed / merged" -> transition to the done-category status.

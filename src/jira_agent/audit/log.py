@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -156,3 +156,30 @@ class AuditLog:
             item["after"] = json.loads(item.pop("after_json") or "null")
             data["results"].append(item)
         return data
+
+    def recent_changes(self, project_key: str, days: int = 14, limit: int = 100) -> list[dict[str, Any]]:
+        """Changes the tool applied to this project recently (newest first), for the planner."""
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        rows = self._db.execute(
+            "SELECT a.action_id, a.action_type, a.issue_key, a.recorded_at, r.id AS run_id, r.plan_json "
+            "FROM action_results a JOIN runs r ON r.id = a.run_id "
+            "WHERE r.project_key = ? AND a.outcome = 'applied' AND a.recorded_at >= ? "
+            "ORDER BY a.id DESC LIMIT ?",
+            (project_key, since, limit),
+        ).fetchall()
+        plans: dict[int, dict[str, Any]] = {}
+        changes: list[dict[str, Any]] = []
+        for row in rows:
+            if row["run_id"] not in plans:
+                actions = (json.loads(row["plan_json"] or "{}") or {}).get("actions", [])
+                plans[row["run_id"]] = {a.get("id"): a for a in actions}
+            action = plans[row["run_id"]].get(row["action_id"], {})
+            detail = {
+                k: action[k]
+                for k in ("summary", "status", "comment", "time_spent", "link_type",
+                          "link_target", "sprint", "assignee")
+                if action.get(k)
+            }
+            changes.append({"issue": row["issue_key"], "type": row["action_type"],
+                            "date": row["recorded_at"][:10], **detail})
+        return changes

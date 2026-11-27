@@ -39,6 +39,13 @@ def _info(message: str) -> None:
     typer.echo(f"         {message}")
 
 
+def _recent_changes(config: BoardConfig) -> list[dict]:
+    """Changes this tool applied recently, so the planner doesn't repeat them."""
+    from jira_agent.audit.log import AuditLog
+    with AuditLog() as audit:
+        return audit.recent_changes(config.project_key)
+
+
 @app.callback()
 def main() -> None:
     """Jira Sprint Agent command-line tool."""
@@ -323,7 +330,7 @@ def snapshot(
 
     try:
         with JiraClient() as jira:
-            context = build_board_context(jira, config)
+            context = build_board_context(jira, config, recent_changes=_recent_changes(config))
     except JiraError as exc:
         _fail(f"Jira: {exc}")
         raise typer.Exit(code=1)
@@ -426,7 +433,7 @@ def plan(
         with JiraClient() as jira:
             runner = jira.get("/rest/api/3/myself").get("displayName", "Scrum Master")
             typer.echo("Reading the board...")
-            context = build_board_context(jira, config)
+            context = build_board_context(jira, config, recent_changes=_recent_changes(config))
     except JiraError as exc:
         _fail(f"Jira: {exc}")
         raise typer.Exit(code=1)
@@ -500,7 +507,7 @@ def plan(
         with JiraClient() as jira:
             runner = jira.get("/rest/api/3/myself").get("displayName", "Scrum Master")
             typer.echo("Reading the board...")
-            context = build_board_context(jira, config)
+            context = build_board_context(jira, config, recent_changes=_recent_changes(config))
 
             typer.echo("Asking Claude for a plan...")
             try:
@@ -676,7 +683,7 @@ def run(
         with JiraClient() as jira, AuditLog() as audit:
             runner = jira.get("/rest/api/3/myself").get("displayName", "Scrum Master")
             typer.echo("Reading the board...")
-            context = build_board_context(jira, config)
+            context = build_board_context(jira, config, recent_changes=_recent_changes(config))
             typer.echo("Asking Claude for a plan...")
             try:
                 result = plan_updates(config, context, text, runner=runner, update_from=update_from)
